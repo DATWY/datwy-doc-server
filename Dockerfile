@@ -1,13 +1,14 @@
 # Use official Node.js runtime as base image
 FROM node:20-bullseye-slim
 
-# Install latest Chrome and required Linux graphic/font libraries
+# Install latest Chrome and required Linux graphic/font/Xvfb libraries
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     ca-certificates \
     procps \
     libxss1 \
+    xvfb \
     fonts-liberation \
     fonts-ipafont-gothic \
     fonts-wqy-zenhei \
@@ -36,9 +37,10 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+ENV DISPLAY=:99
 
 # Expose server port
 EXPOSE 3000
 
-# Start Express server
-CMD ["node", "index.js"]
+# Start Express server with Xvfb virtual display
+CMD ["xvfb-run", "-a", "--server-args=-screen 0 1920x1080x24", "node", "index.js"]

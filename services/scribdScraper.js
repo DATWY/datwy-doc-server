@@ -68,7 +68,7 @@ async function generateScribdPdf(docId, targetUrl, onProgress = () => {}, option
     ];
 
     const connectOptions = {
-      headless: true,
+      headless: false,
       turnstile: true,
       args: launchArgs
     };

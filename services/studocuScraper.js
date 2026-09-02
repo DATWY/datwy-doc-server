@@ -84,7 +84,7 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
     ];
 
     const connectOptions = {
-      headless: true, // Headless on Linux Render server
+      headless: false, // Runs seamlessly inside Xvfb virtual display
       turnstile: true,
       args: launchArgs
     };
@@ -140,13 +140,20 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
 
     await new Promise(r => setTimeout(r, 3000));
 
-    const is404 = await page.evaluate(() => {
+    const checkResult = await page.evaluate(() => {
       const title = document.title || '';
-      return title.startsWith('404') || document.querySelector('.error-page-404, [data-test-selector="404"]') !== null;
+      const is404 = title.startsWith('404') || document.querySelector('.error-page-404, [data-test-selector="404"]') !== null;
+      const bodyText = document.body ? document.body.innerText : '';
+      const isBlocked = bodyText.includes('Access Blocked') || bodyText.includes('temporarily restricted your access');
+      return { is404, isBlocked };
     });
 
-    if (is404) {
+    if (checkResult.is404) {
       throw new Error(`Tài liệu Studocu không tồn tại hoặc đã bị gỡ bỏ (Mã lỗi 404).`);
+    }
+
+    if (checkResult.isBlocked) {
+      throw new Error(`Studocu đã tạm thời chặn IP máy chủ này (Access Blocked). Vui lòng thử lại sau ít phút.`);
     }
 
     // Extract Title & Page Count
