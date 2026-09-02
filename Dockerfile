@@ -1,7 +1,7 @@
 # Use official Node.js runtime as base image
 FROM node:20-bullseye-slim
 
-# Install latest Chrome and required Linux graphic/font/Xvfb libraries
+# Install latest Chrome and required Linux graphic/font/Xvfb/xauth libraries
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y \
     procps \
     libxss1 \
     xvfb \
+    xauth \
+    dbus-x11 \
     fonts-liberation \
     fonts-ipafont-gothic \
     fonts-wqy-zenhei \
