@@ -1,0 +1,18 @@
+{
+  "name": "datwy-doc-downloader-server",
+  "version": "2.0.0",
+  "description": "High-performance Scribd & Studocu PDF Downloader Server with Puppeteer & Cloudflare Turnstile auto-solve",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer-real-browser": "^1.3.15",
+    "rebrowser-puppeteer-core": "^23.2.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
