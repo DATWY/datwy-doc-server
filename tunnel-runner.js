@@ -266,8 +266,16 @@ async function startTunnelRunner() {
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
 
-  // Windows-specific close handling
-  if (process.platform === 'win32') {
+  // Crash guards to keep runner alive 24/7 across network disconnects
+  process.on('uncaughtException', (err) => {
+    console.warn('[Runner Auto-Recovered from Exception]:', err.message);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.warn('[Runner Auto-Recovered from Rejection]:', reason);
+  });
+
+  // Windows-specific close handling (only if interactive TTY)
+  if (process.platform === 'win32' && process.stdin.isTTY) {
     const rl = require('readline').createInterface({
       input: process.stdin,
       output: process.stdout
@@ -277,5 +285,6 @@ async function startTunnelRunner() {
     });
   }
 }
+
 
 startTunnelRunner();
