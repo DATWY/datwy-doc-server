@@ -271,196 +271,190 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
       step: 4,
       percent: 75,
       status: 'rendering_assets',
-      message: 'Đang trích xuất và giải mã toàn bộ hình ảnh độ phân giải cao vào bộ nhớ...'
+      message: 'Đang unblur, chuẩn hóa khung trang và triệt tiêu hoàn toàn trang trắng...'
     });
 
-    const pageImages = await page.evaluate(async () => {
-      // Unblur
+    const renderMeta = await page.evaluate(() => {
+      // 1. Remove all non-document overlays, banners, headers, footers, sidebars
       document.querySelectorAll(`
-        .blurred, .blurred-container, .blurred_page, [class*="blur"], [class*="blurred"]
+        header, footer, nav, aside, #sidebar, [class*="DocumentFooter"],
+        [class*="FloatingComponent"], [class*="banner"], [class*="Banner"],
+        [class*="paywall"], [class*="Paywall"], [class*="Rating"], [class*="Feedback"],
+        [class*="Toolbar"], [class*="toolbar"], [class*="recommendation"],
+        #onetrust-consent-sdk, .onetrust-pc-dark-filter
       `).forEach(el => {
-        el.classList.remove('blurred', 'blurred-container', 'blurred_page');
-        el.style.filter = 'none';
-        el.style.opacity = '1';
-        el.style.visibility = 'visible';
+        try { el.remove(); } catch (e) {}
       });
 
-      let pfs = Array.from(document.querySelectorAll('.pf'));
-      if (pfs.length === 0) pfs = Array.from(document.querySelectorAll('[data-page-index]'));
-      const results = [];
+      const pfs = Array.from(document.querySelectorAll('.pf'));
+      if (pfs.length === 0) return null;
 
-      for (let idx = 0; idx < pfs.length; idx++) {
-        const pf = pfs[idx];
-        pf.style.display = 'block';
-        pf.style.visibility = 'visible';
-        pf.style.opacity = '1';
-
-        const img = pf.querySelector('img');
-        if (!img) {
-          results.push(null);
-          continue;
-        }
-
-        let dataUrl = null;
-
-        // 1. Try Canvas extraction (fastest & doesn't require extra network request if already decoded)
-        try {
-          if (img.complete && img.naturalWidth > 0) {
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
-            dataUrl = canvas.toDataURL('image/png');
+      // 2. Unblur all elements inside all pages
+      pfs.forEach(pf => {
+        pf.querySelectorAll('*').forEach(el => {
+          el.classList.remove('blurred', 'blurred-container', 'blurred_page');
+          if (el.style) {
+            el.style.filter = 'none';
+            el.style.opacity = '1';
+            el.style.visibility = 'visible';
           }
-        } catch (e) {}
+        });
+      });
 
-        // 2. Fallback to Fetch Blob -> DataURL
-        const imgSrc = img.src || img.currentSrc || img.getAttribute('src');
-        if (!dataUrl && imgSrc) {
-          try {
-            const res = await fetch(imgSrc);
-            if (res.ok) {
-              const blob = await res.blob();
-              dataUrl = await new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onloadend = () => resolve(reader.result);
-                reader.onerror = reject;
-                reader.readAsDataURL(blob);
-              });
+      // 3. Exact native dimensions from first page
+      const pf1 = pfs[0];
+      const comp = window.getComputedStyle(pf1);
+      const w = parseFloat(comp.width) || 612;
+      const h = parseFloat(comp.height) || 792;
+
+      // 4. Find page-container or parent and isolate
+      let container = document.querySelector('#page-container');
+      if (!container) container = pf1.parentElement;
+
+      // Remove all siblings of container up the tree
+      let cur = container;
+      while (cur && cur !== document.body) {
+        if (cur.parentElement) {
+          Array.from(cur.parentElement.children).forEach(sibling => {
+            if (sibling !== cur && sibling.tagName !== 'STYLE' && sibling.tagName !== 'LINK') {
+              try { sibling.remove(); } catch (e) {}
             }
-          } catch (e) {}
-        }
-
-        if (dataUrl && dataUrl.length > 100) {
-          results.push({
-            page: idx + 1,
-            dataUrl
           });
-        } else {
-          results.push(null);
         }
+        cur = cur.parentElement;
       }
 
-      return results;
+      // 5. Re-populate container strictly with .pf children only
+      container.innerHTML = '';
+      pfs.forEach((pf, i) => {
+        pf.style.setProperty('display', 'block', 'important');
+        pf.style.setProperty('width', `${w}px`, 'important');
+        pf.style.setProperty('height', `${h}px`, 'important');
+        pf.style.setProperty('margin', '0 auto', 'important');
+        pf.style.setProperty('padding', '0', 'important');
+        pf.style.setProperty('position', 'relative', 'important');
+        pf.style.setProperty('overflow', 'hidden', 'important');
+        pf.style.setProperty('background', '#ffffff', 'important');
+        pf.style.setProperty('border', 'none', 'important');
+        pf.style.setProperty('box-shadow', 'none', 'important');
+        pf.style.setProperty('transform', 'none', 'important');
+        if (i < pfs.length - 1) {
+          pf.style.setProperty('page-break-after', 'always', 'important');
+          pf.style.setProperty('break-after', 'page', 'important');
+        } else {
+          pf.style.setProperty('page-break-after', 'avoid', 'important');
+          pf.style.setProperty('break-after', 'avoid', 'important');
+        }
+        pf.style.setProperty('page-break-inside', 'avoid', 'important');
+        pf.style.setProperty('break-inside', 'avoid', 'important');
+
+        // Ensure page content has exact size
+        const pc = pf.querySelector('.page-content, .pc');
+        if (pc) {
+          pc.style.setProperty('display', 'block', 'important');
+          pc.style.setProperty('width', `${w}px`, 'important');
+          pc.style.setProperty('height', `${h}px`, 'important');
+          pc.style.setProperty('position', 'absolute', 'important');
+          pc.style.setProperty('top', '0', 'important');
+          pc.style.setProperty('left', '0', 'important');
+          pc.style.setProperty('overflow', 'hidden', 'important');
+        }
+
+        container.appendChild(pf);
+      });
+
+      // 6. Inject clean print stylesheet
+      const style = document.createElement('style');
+      style.id = 'zero-blank-print-css';
+      style.innerHTML = `
+        @page {
+          size: ${w}px ${h}px !important;
+          margin: 0 !important;
+        }
+        *, *::before, *::after {
+          box-sizing: border-box !important;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+        html, body {
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #ffffff !important;
+          width: ${w}px !important;
+          height: auto !important;
+          overflow: visible !important;
+        }
+        #__next, #main-wrapper, #viewer-wrapper, #document-wrapper, #page-container-wrapper, #page-container, .p2hv, [class*="descaler"] {
+          display: block !important;
+          width: ${w}px !important;
+          max-width: ${w}px !important;
+          min-width: 0 !important;
+          margin: 0 auto !important;
+          padding: 0 !important;
+          position: static !important;
+          transform: none !important;
+          zoom: 1 !important;
+          background: transparent !important;
+          overflow: visible !important;
+        }
+        .pf {
+          display: block !important;
+          width: ${w}px !important;
+          height: ${h}px !important;
+          margin: 0 auto !important;
+          padding: 0 !important;
+          position: relative !important;
+          overflow: hidden !important;
+          background: #ffffff !important;
+          page-break-inside: avoid !important;
+          break-inside: avoid !important;
+        }
+        .bi, img {
+          filter: none !important;
+          opacity: 1 !important;
+          visibility: visible !important;
+        }
+        .t {
+          visibility: visible !important;
+          opacity: 1 !important;
+        }
+      `;
+      document.head.appendChild(style);
+
+      return { totalPages: pfs.length, w, h };
     });
 
-    const validImages = pageImages.filter(Boolean);
-    let pdfBuffer;
-    let actualPages = 0;
-
-    if (validImages.length > 0) {
-      onProgress({
-        step: 5,
-        percent: 85,
-        status: 'cleaning_dom',
-        message: 'Tái tạo khung trang nguyên vẹn 1:1, triệt tiêu hoàn toàn vệt cắt và méo khung hình...'
-      });
-
-      const renderPage = await browser.newPage();
-      
-      const firstImage = validImages[0];
-      const dimensions = await renderPage.evaluate(async (dataUrl) => {
-        const img = new Image();
-        img.src = dataUrl;
-        await img.decode();
-        return { width: img.naturalWidth, height: img.naturalHeight };
-      }, firstImage.dataUrl);
-
-      const targetW = dimensions.width > 0 ? dimensions.width : 1225;
-      const targetH = dimensions.height > 0 ? dimensions.height : 1585;
-      actualPages = validImages.length;
-
-      const cleanHtml = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="utf-8">
-          <title>${docMeta.title}</title>
-          <style>
-            @page {
-              size: ${targetW}px ${targetH}px !important;
-              margin: 0 !important;
-            }
-            *, *::before, *::after {
-              box-sizing: border-box !important;
-              -webkit-print-color-adjust: exact !important;
-              print-color-adjust: exact !important;
-            }
-            html, body {
-              margin: 0 !important;
-              padding: 0 !important;
-              background: #fff !important;
-              width: ${targetW}px !important;
-            }
-            .page-wrapper {
-              width: ${targetW}px !important;
-              height: ${targetH}px !important;
-              position: relative !important;
-              page-break-after: always !important;
-              break-after: page !important;
-              page-break-inside: avoid !important;
-              break-inside: avoid !important;
-              overflow: hidden !important;
-              background: #fff !important;
-            }
-            .page-wrapper:last-child {
-              page-break-after: avoid !important;
-              break-after: avoid !important;
-            }
-            .page-wrapper img {
-              width: ${targetW}px !important;
-              height: ${targetH}px !important;
-              display: block !important;
-              object-fit: fill !important;
-              position: absolute !important;
-              top: 0 !important;
-              left: 0 !important;
-              margin: 0 !important;
-              padding: 0 !important;
-            }
-          </style>
-        </head>
-        <body>
-          ${validImages.map((img, i) => `
-            <div class="page-wrapper" id="page-${i+1}">
-              <img src="${img.dataUrl}" alt="Page ${i+1}" />
-            </div>
-          `).join('')}
-        </body>
-        </html>
-      `;
-
-      await renderPage.setContent(cleanHtml, { waitUntil: 'load' });
-
-      // Ensure all images are decoded synchronously
-      await renderPage.evaluate(async () => {
-        const imgs = Array.from(document.querySelectorAll('img'));
-        await Promise.all(imgs.map(img => img.decode().catch(() => {})));
-      });
-
-      onProgress({
-        step: 5,
-        percent: 92,
-        status: 'generating_pdf',
-        message: `Đang kết xuất buffer PDF sắc nét chuẩn 1:1 (${actualPages} trang)...`
-      });
-
-      await renderPage.emulateMediaType('screen');
-
-      pdfBuffer = await renderPage.pdf({
-        width: `${targetW}px`,
-        height: `${targetH}px`,
-        printBackground: true,
-        preferCSSPageSize: true,
-        pageRanges: `1-${actualPages}`,
-        margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
-      });
-
-      await renderPage.close();
-    } else {
-      throw new Error('Không thể trích xuất hình ảnh các trang tài liệu Studocu để kết xuất PDF nguyên vẹn.');
+    if (!renderMeta || renderMeta.totalPages === 0) {
+      throw new Error('Không thể tìm thấy các trang tài liệu Studocu để kết xuất PDF.');
     }
+
+    const actualPages = renderMeta.totalPages;
+
+    // Wait for all images to decode
+    await page.evaluate(async () => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      await Promise.all(imgs.map(img => img.decode().catch(() => {})));
+    });
+
+    onProgress({
+      step: 5,
+      percent: 90,
+      status: 'generating_pdf',
+      message: `Đang kết xuất buffer PDF sắc nét chuẩn 1:1 (${actualPages} trang, không trang trắng)...`
+    });
+
+    await page.emulateMediaType('screen');
+    await new Promise(r => setTimeout(r, 1000));
+
+    const pdfBuffer = await page.pdf({
+      width: `${renderMeta.w}px`,
+      height: `${renderMeta.h}px`,
+      printBackground: true,
+      preferCSSPageSize: true,
+      pageRanges: `1-${actualPages}`,
+      margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+    });
+
 
     if (!pdfBuffer || pdfBuffer.length < 2048) {
       throw new Error('Không thể kết xuất tài liệu Studocu hoặc tài liệu bị rỗng.');
