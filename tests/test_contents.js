@@ -1,0 +1,191 @@
+const { connect } = require('puppeteer-real-browser');
+const fs = require('fs');
+
+async function testContents() {
+  const url = 'https://www.studocu.vn/vn/document/truong-dai-hoc-cong-nghiep-thanh-pho-ho-chi-minh/kien-truc-may-tinh/ly-thuyet-kien-truc-may-tinh-ktmt-1-cac-van-de-co-ban-va-hieu-suat/157160979';
+  const connection = await connect({ headless: false, turnstile: true });
+  const { page, browser } = connection;
+  await page.setViewport({ width: 1400, height: 2000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await new Promise(r => setTimeout(r, 6000));
+
+  await page.evaluate(async () => {
+    // Unblur and scroll
+    const unblur = () => {
+      document.querySelectorAll('.blurred, .blurred-container, .blurred_page, [class*="blur"]').forEach(el => {
+        el.classList.remove('blurred', 'blurred-container', 'blurred_page');
+        el.style.filter = 'none';
+        el.style.opacity = '1';
+        el.style.visibility = 'visible';
+      });
+      document.querySelectorAll('.pf, .page-content, .pc, .bi, img').forEach(el => {
+        el.style.filter = 'none';
+        el.style.opacity = '1';
+        el.style.visibility = 'visible';
+      });
+    };
+    unblur();
+    const pages = Array.from(document.querySelectorAll('.pf'));
+    for (let i = 0; i < pages.length; i++) {
+      pages[i].scrollIntoView({ behavior: 'instant', block: 'center' });
+      unblur();
+      await new Promise(r => setTimeout(r, 100));
+    }
+    window.scrollTo(0, 0);
+
+    document.querySelectorAll('.page-content').forEach(pc => {
+      pc.style.display = 'block';
+      pc.style.visibility = 'visible';
+      pc.style.opacity = '1';
+    });
+
+    const pf1 = document.querySelector('.pf');
+    const comp = window.getComputedStyle(pf1);
+    const w = parseFloat(comp.width) || 595.3;
+    const h = parseFloat(comp.height) || 841.9;
+
+    const style = document.createElement('style');
+    style.id = 'clean-contents-style';
+    style.innerHTML = `
+      @page {
+        size: ${w}px ${h}px;
+        margin: 0;
+      }
+      *, *::before, *::after {
+        box-sizing: border-box !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: ${w}px !important;
+        background: #fff !important;
+        overflow: visible !important;
+      }
+      header, footer, nav, aside, #sidebar, #sidebar-wrapper, #sidebar-toggle-button,
+      [class*="Sidebar"], [class*="sidebar"], [class*="Topbar"], [class*="Header"],
+      [class*="summaryWrapper"], [class*="AiSummary"], [class*="aiSummary"],
+      [class*="Summary"], [class*="banner"], [class*="Banner"],
+      [class*="FloatingComponent"], [class*="DocumentFooter"], [class*="Metadata"],
+      [class*="CourseInfo"], [class*="CourseDocumentsTag"], [class*="SaveDocumentButton"],
+      [class*="ClarificationBanner"], [class*="Paywall"], [class*="paywall"],
+      #onetrust-consent-sdk, .adsbox, [class*="document-viewer-banner"] {
+        display: none !important;
+      }
+      #page-container > div:first-child:not(:has(.pf)) {
+        display: none !important;
+      }
+      #page-container > div {
+        display: contents !important;
+      }
+      #__next, #main-wrapper, #viewer-wrapper, #document-wrapper,
+      #page-container-wrapper, #page-container, .p2hv, [class*="descaler"],
+      [class*="pageContentWrapper"], [class*="wrapper"] {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: ${w}px !important;
+        max-width: ${w}px !important;
+        position: static !important;
+        transform: none !important;
+        background: transparent !important;
+        border: none !important;
+        overflow: visible !important;
+      }
+      .pf {
+        display: block !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: ${w}px !important;
+        height: ${h}px !important;
+        position: relative !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        page-break-after: page !important;
+        break-after: page !important;
+        box-shadow: none !important;
+        border: none !important;
+        outline: none !important;
+        background: #fff !important;
+        overflow: hidden !important;
+      }
+      .page-content {
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        width: 100% !important;
+        height: 100% !important;
+      }
+      .pc {
+        display: block !important;
+        width: 100% !important;
+        height: 100% !important;
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+      }
+      .bi, img {
+        display: block !important;
+        width: 100% !important;
+        height: 100% !important;
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        filter: none !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      .t {
+        visibility: visible !important;
+        opacity: 1 !important;
+      }
+    `;
+    document.head.appendChild(style);
+  });
+
+  // Await images
+  await page.evaluate(async () => {
+    const imgs = Array.from(document.querySelectorAll('.pf img, img.bi, .bi'));
+    await Promise.all(imgs.map(img => {
+      if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+      return new Promise(res => {
+        img.onload = res;
+        img.onerror = res;
+        setTimeout(res, 3000);
+      });
+    }));
+  });
+
+  const pf1 = await page.evaluate(() => {
+    const p = document.querySelector('.pf');
+    const comp = window.getComputedStyle(p);
+    return { w: parseFloat(comp.width), h: parseFloat(comp.height) };
+  });
+
+  await page.emulateMediaType('screen');
+
+  const pdf = await page.pdf({
+    width: `${pf1.w}px`,
+    height: `${pf1.h}px`,
+    printBackground: true,
+    preferCSSPageSize: true,
+    margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+  });
+
+  const out = './tmp/pdf_cache/test_contents_final.pdf';
+  fs.writeFileSync(out, pdf);
+
+  const str = pdf.toString('latin1');
+  const matches = str.match(/\/Type\s*\/Page\b/g) || [];
+  console.log('Final page count:', matches.length, 'Size:', pdf.length);
+
+  await browser.close();
+}
+
+testContents().catch(console.error);

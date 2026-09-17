@@ -39,28 +39,31 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
       const stats = fs.statSync(outputPath);
       const ageMs = Date.now() - stats.mtimeMs;
       if (ageMs < 15 * 60 * 1000 && stats.size > 30 * 1024) {
-        onProgress({
-          step: 5,
-          percent: 100,
-          status: 'completed',
-          message: 'Tài liệu Studocu đã có sẵn trong bộ nhớ đệm!',
-          data: {
-            docId,
-            platform: 'studocu',
-            filePath: outputPath,
-            fileSize: stats.size,
-            fileSizeFormatted: (stats.size / (1024 * 1024)).toFixed(2) + ' MB',
-            fromCache: true
-          }
-        });
-        return {
+        let cachedPages = 0;
+        try {
+          const buf = fs.readFileSync(outputPath);
+          const matches = buf.toString('latin1').match(/\/Type\s*\/Page\b/g);
+          cachedPages = matches ? matches.length : 0;
+        } catch (e) {}
+
+        const cachedResult = {
           docId,
           platform: 'studocu',
+          totalPages: cachedPages || 1,
           filePath: outputPath,
           fileSize: stats.size,
           fileSizeFormatted: (stats.size / (1024 * 1024)).toFixed(2) + ' MB',
           fromCache: true
         };
+
+        onProgress({
+          step: 5,
+          percent: 100,
+          status: 'completed',
+          message: 'Tài liệu Studocu đã có sẵn trong bộ nhớ đệm!',
+          data: cachedResult
+        });
+        return cachedResult;
       }
     } catch (e) {}
   }
@@ -98,7 +101,7 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
     browser = connection.browser;
     page = connection.page;
 
-    await page.setViewport({ width: 1280, height: 1800, deviceScaleFactor: 1.5 });
+    await page.setViewport({ width: 1600, height: 2200, deviceScaleFactor: 2 });
 
     onProgress({
       step: 2,
@@ -140,6 +143,43 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
 
     await new Promise(r => setTimeout(r, 3000));
 
+    // If user provided a course URL, automatically extract the first document under this course
+    const courseDocUrl = await page.evaluate(() => {
+      if (window.location.href.includes('/course/')) {
+        const docLink = document.querySelector('a[href*="/document/"]');
+        return docLink ? docLink.href : null;
+      }
+      return null;
+    });
+
+    if (courseDocUrl) {
+      onProgress({
+        step: 2,
+        percent: 35,
+        status: 'navigating_document',
+        message: 'Đã nhận diện khóa học, tự động chuyển vào tài liệu tiêu biểu trong khóa...'
+      });
+      await page.goto(courseDocUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      // Wait for Turnstile on document page
+      for (let i = 0; i < 20; i++) {
+        const pfCount = await page.evaluate(() => document.querySelectorAll('.pf').length);
+        if (pfCount > 0) break;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    // Dismiss cookie banners & popups immediately to keep DOM clean
+    await page.evaluate(() => {
+      document.querySelectorAll(`
+        #onetrust-consent-sdk, .onetrust-pc-dark-filter,
+        [id*="cookie"], [class*="cookie"], [class*="Cookie"],
+        [class*="paywall"], [class*="banner"], [class*="Popup"]
+      `).forEach(el => {
+        try { el.remove(); } catch(e) {}
+      });
+    });
+
     const checkResult = await page.evaluate(() => {
       const title = document.title || '';
       const is404 = title.startsWith('404') || document.querySelector('.error-page-404, [data-test-selector="404"]') !== null;
@@ -177,326 +217,250 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
 
     onProgress({
       step: 3,
-      percent: 40,
+      percent: 45,
       status: 'unblurring_and_scrolling',
-      message: `Tài liệu: "${docMeta.title}" (${docMeta.estimatedPages} trang). Đang nạp và mở khóa toàn bộ trang & ảnh gốc...`,
+      message: `Tài liệu: "${docMeta.title}" (${docMeta.estimatedPages} trang). Đang unblur và tải ảnh gốc sắc nét...`,
       data: {
         title: docMeta.title,
         totalPages: docMeta.estimatedPages
       }
     });
 
-    // Deep Progressive Unblurring and Hydration for All Pages
-    await page.evaluate(async () => {
-      const unblurAll = () => {
-        document.querySelectorAll(
-          '.blurred, .blurred-container, .blurred_page, [class*="blur"], [class*="blurred"], [class*="blurredImageWrapper"]'
-        ).forEach((el) => {
-          el.classList.remove('blurred', 'blurred-container', 'blurred_page');
-          el.style.filter = 'none';
-          el.style.opacity = '1';
-          el.style.visibility = 'visible';
-          el.style.userSelect = 'text';
-        });
+    // Deep Progressive Hydration & Scroll for All Pages (executed from Node.js event loop)
+    const totalPfCount = await page.evaluate(() => {
+      const pfs = document.querySelectorAll('.pf');
+      return pfs.length > 0 ? pfs.length : document.querySelectorAll('[data-page-index]').length;
+    });
 
-        document.querySelectorAll('.page-content, [class*="page-content"], .pc').forEach(el => {
-          el.style.display = 'block';
-          el.style.visibility = 'visible';
-          el.style.opacity = '1';
-          el.style.filter = 'none';
-        });
+    for (let pageIdx = 0; pageIdx < totalPfCount; pageIdx++) {
+      await page.evaluate((idx) => {
+        let el = document.querySelectorAll('.pf')[idx];
+        if (!el) el = document.querySelectorAll('[data-page-index]')[idx];
+        if (el) el.scrollIntoView({ behavior: 'auto', block: 'center' });
+      }, pageIdx);
+      await new Promise(r => setTimeout(r, 300));
+    }
 
-        document.querySelectorAll('.pf img, img.bi, .page-content img').forEach(img => {
-          img.style.filter = 'none';
-          img.style.opacity = '1';
-          img.style.visibility = 'visible';
-          img.style.display = 'block';
-        });
-
-        document.querySelectorAll(
-          '.paywall, .premium-overlay, .document-viewer-banner, [data-test-selector="document-viewer-banner"], #preview-banner, .blurred-page-cover, [class*="PremiumPageClarificationBanner"], [class*="ClarificationBanner"], [class*="Paywall"], [class*="FloatingComponent"], [class*="GetMoreAiStudyHelp"], [class*="MobileAppBanner"], [class*="AppBanner"], [class*="Prompt"]'
-        ).forEach(el => {
-          try { el.remove(); } catch (e) {}
-        });
-      };
-
-      unblurAll();
-
-      await new Promise((resolve) => {
-        let pos = 0;
-        const step = 600;
-        const timer = setInterval(() => {
-          window.scrollBy(0, step);
-          pos += step;
-          unblurAll();
-
-          const totalHeight = document.body ? (document.body.scrollHeight || document.documentElement.scrollHeight || 60000) : 60000;
-          if (pos >= totalHeight + 6000) {
-            clearInterval(timer);
-            resolve();
+    // Double check that 100% of pages are populated; re-scroll any missing virtual pages
+    for (let retry = 0; retry < 3; retry++) {
+      const missingIndices = await page.evaluate(() => {
+        let pfs = Array.from(document.querySelectorAll('.pf'));
+        if (pfs.length === 0) pfs = Array.from(document.querySelectorAll('[data-page-index]'));
+        const missing = [];
+        pfs.forEach((p, idx) => {
+          if (!p.querySelector('.pc, img, .t, svg')) {
+            missing.push(idx);
           }
-        }, 40);
-      });
-    });
-
-    onProgress({
-      step: 3,
-      percent: 70,
-      status: 'rendering_assets',
-      message: 'Đang đảm bảo 100% hình ảnh độ nét cao và phông chữ vector đã tải xong...'
-    });
-
-    // Ensure all images are loaded
-    await page.evaluate(async () => {
-      const images = Array.from(document.querySelectorAll('#document-wrapper img, .pf img, img.bi, .page-content img'));
-      await Promise.all(images.map(img => {
-        if (img.complete) return Promise.resolve();
-        return new Promise(resolve => {
-          img.onload = resolve;
-          img.onerror = resolve;
-          setTimeout(resolve, 3000);
         });
-      }));
-    });
+        return missing;
+      });
 
-    await new Promise((r) => setTimeout(r, 2000));
+      if (missingIndices.length === 0) break;
+
+      for (const idx of missingIndices) {
+        await page.evaluate((i) => {
+          let el = document.querySelectorAll('.pf')[i];
+          if (!el) el = document.querySelectorAll('[data-page-index]')[i];
+          if (el) el.scrollIntoView({ behavior: 'auto', block: 'center' });
+        }, idx);
+        await new Promise(r => setTimeout(r, 450));
+      }
+    }
 
     onProgress({
       step: 4,
-      percent: 85,
-      status: 'cleaning_dom',
-      message: 'Căn chỉnh chuẩn khổ in A4, triệt tiêu hoàn toàn độ lệch (0% Misalignment, 0% Crop)...'
+      percent: 75,
+      status: 'rendering_assets',
+      message: 'Đang trích xuất và giải mã toàn bộ hình ảnh độ phân giải cao vào bộ nhớ...'
     });
 
-    // Reset parent hierarchy to (0,0) flush margin while preserving all scoped CSS classes
-    const processedStats = await page.evaluate(() => {
-      window.scrollTo(0, 0);
-      document.documentElement.scrollTop = 0;
-      document.body.scrollTop = 0;
-
-      const unwanted = [
-        '#header-position-wrapper',
-        'header',
-        'nav',
-        'footer',
-        'aside',
-        '#sidebar',
-        '#onetrust-consent-sdk',
-        '#onetrust-banner-sdk',
-        '.ot-sdk-container',
-        '[class*="TopFloatingComponent"]',
-        '[class*="FloatingComponent"]',
-        '[class*="GetMoreAiStudyHelp"]',
-        '[class*="MobileAppBanner"]',
-        '[class*="AppBanner"]',
-        '[class*="DocumentFooter"]',
-        '[class*="Rating"]',
-        '[class*="Feedback"]',
-        '[class*="banner"]',
-        '#document-preview-text',
-        '.paywall',
-        '.premium-overlay',
-        '[class*="PremiumPageClarificationBanner"]',
-        '[class*="ClarificationBanner"]',
-        '.blurred-container'
-      ];
-      unwanted.forEach(sel => {
-        document.querySelectorAll(sel).forEach(el => {
-          if (!el.closest('.pf')) {
-            try { el.remove(); } catch (e) {}
-          }
-        });
+    const pageImages = await page.evaluate(async () => {
+      // Unblur
+      document.querySelectorAll(`
+        .blurred, .blurred-container, .blurred_page, [class*="blur"], [class*="blurred"]
+      `).forEach(el => {
+        el.classList.remove('blurred', 'blurred-container', 'blurred_page');
+        el.style.filter = 'none';
+        el.style.opacity = '1';
+        el.style.visibility = 'visible';
       });
 
-      const pf1 = document.querySelector('.pf');
-      const w = pf1 ? (pf1.offsetWidth || parseFloat(getComputedStyle(pf1).width) || 612) : 612;
-      const h = pf1 ? (pf1.offsetHeight || parseFloat(getComputedStyle(pf1).height) || 792) : 792;
+      let pfs = Array.from(document.querySelectorAll('.pf'));
+      if (pfs.length === 0) pfs = Array.from(document.querySelectorAll('[data-page-index]'));
+      const results = [];
 
-      let current = pf1 ? pf1.parentElement : null;
-      while (current && current !== document.documentElement) {
-        current.style.margin = '0';
-        current.style.padding = '0';
-        current.style.transform = 'none';
-        current.style.webkitTransform = 'none';
-        current.style.top = '0';
-        current.style.left = '0';
-        current.style.position = 'static';
-        current.style.overflow = 'visible';
-        current.style.minHeight = '0';
-        current.scrollTop = 0;
-        current.scrollLeft = 0;
-        current = current.parentElement;
-      }
-
-      const pfPages = document.querySelectorAll('.pf');
-      pfPages.forEach(pf => {
+      for (let idx = 0; idx < pfs.length; idx++) {
+        const pf = pfs[idx];
         pf.style.display = 'block';
         pf.style.visibility = 'visible';
         pf.style.opacity = '1';
-        pf.style.filter = 'none';
-        pf.style.transform = 'none';
-        pf.style.margin = '0 auto';
-        pf.style.padding = '0';
-        pf.style.left = '0';
-        pf.style.top = '0';
-        pf.style.width = `${w}px`;
-        pf.style.height = `${h}px`;
-        pf.style.boxShadow = 'none';
-        pf.style.border = 'none';
-        pf.style.position = 'relative';
-        pf.style.pageBreakAfter = 'always';
-        pf.style.breakAfter = 'page';
 
-        pf.querySelectorAll('.page-content, [class*="page-content"]').forEach(pcWrap => {
-          pcWrap.style.display = 'block';
-          pcWrap.style.visibility = 'visible';
-          pcWrap.style.opacity = '1';
-          pcWrap.style.filter = 'none';
-          pcWrap.style.width = '100%';
-          pcWrap.style.height = '100%';
-        });
+        const img = pf.querySelector('img');
+        if (!img) {
+          results.push(null);
+          continue;
+        }
 
-        pf.querySelectorAll('.pc').forEach(pc => {
-          pc.style.display = 'block';
-          pc.style.visibility = 'visible';
-          pc.style.opacity = '1';
-          pc.style.left = '0';
-          pc.style.top = '0';
-          pc.style.width = '100%';
-          pc.style.height = '100%';
-          pc.style.transform = 'none';
-        });
+        let dataUrl = null;
 
-        pf.querySelectorAll('.bi, img').forEach(bi => {
-          bi.style.display = 'block';
-          bi.style.position = 'absolute';
-          bi.style.left = '0';
-          bi.style.top = '0';
-          bi.style.width = '100%';
-          bi.style.height = '100%';
-          bi.style.visibility = 'visible';
-          bi.style.opacity = '1';
-          bi.style.filter = 'none';
-        });
+        // 1. Try Canvas extraction (fastest & doesn't require extra network request if already decoded)
+        try {
+          if (img.complete && img.naturalWidth > 0) {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            dataUrl = canvas.toDataURL('image/png');
+          }
+        } catch (e) {}
 
-        pf.querySelectorAll('.t').forEach(t => {
-          t.style.visibility = 'visible';
-          t.style.opacity = '1';
-        });
+        // 2. Fallback to Fetch Blob -> DataURL
+        const imgSrc = img.src || img.currentSrc || img.getAttribute('src');
+        if (!dataUrl && imgSrc) {
+          try {
+            const res = await fetch(imgSrc);
+            if (res.ok) {
+              const blob = await res.blob();
+              dataUrl = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+              });
+            }
+          } catch (e) {}
+        }
+
+        if (dataUrl && dataUrl.length > 100) {
+          results.push({
+            page: idx + 1,
+            dataUrl
+          });
+        } else {
+          results.push(null);
+        }
+      }
+
+      return results;
+    });
+
+    const validImages = pageImages.filter(Boolean);
+    let pdfBuffer;
+    let actualPages = 0;
+
+    if (validImages.length > 0) {
+      onProgress({
+        step: 5,
+        percent: 85,
+        status: 'cleaning_dom',
+        message: 'Tái tạo khung trang nguyên vẹn 1:1, triệt tiêu hoàn toàn vệt cắt và méo khung hình...'
       });
 
-      const style = document.createElement('style');
-      style.id = 'pure-flawless-print-css';
-      style.innerHTML = `
-        @page {
-          size: ${w}px ${h}px !important;
-          margin: 0 !important;
-        }
-        *, *::before, *::after {
-          box-sizing: border-box !important;
-        }
-        html, body {
-          width: ${w}px !important;
-          height: auto !important;
-          background: #ffffff !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          -webkit-print-color-adjust: exact !important;
-          print-color-adjust: exact !important;
-        }
-        #__next, #main-wrapper, #viewer-wrapper, #document-wrapper, [class*="descaler"], #page-container-wrapper, #page-container, .p2hv {
-          display: block !important;
-          width: ${w}px !important;
-          max-width: ${w}px !important;
-          min-width: 0 !important;
-          height: auto !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          position: static !important;
-          transform: none !important;
-          overflow: visible !important;
-          background: #ffffff !important;
-        }
-        .pf {
-          display: block !important;
-          position: relative !important;
-          width: ${w}px !important;
-          height: ${h}px !important;
-          page-break-after: always !important;
-          page-break-inside: avoid !important;
-          break-after: page !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          left: 0 !important;
-          top: 0 !important;
-          background: #ffffff !important;
-          overflow: hidden !important;
-          box-shadow: none !important;
-          border: none !important;
-        }
-        .pc {
-          display: block !important;
-          position: absolute !important;
-          left: 0 !important;
-          top: 0 !important;
-          width: 100% !important;
-          height: 100% !important;
-          visibility: visible !important;
-          opacity: 1 !important;
-        }
-        .bi, img {
-          display: block !important;
-          position: absolute !important;
-          left: 0 !important;
-          top: 0 !important;
-          width: 100% !important;
-          height: 100% !important;
-          visibility: visible !important;
-          opacity: 1 !important;
-        }
-        .t {
-          visibility: visible !important;
-          opacity: 1 !important;
-        }
-        header, footer, nav, aside, #sidebar, [class*="DocumentFooter"], #onetrust-consent-sdk, [class*="FloatingComponent"], [class*="GetMoreAiStudyHelp"] {
-          display: none !important;
-        }
+      const renderPage = await browser.newPage();
+      
+      const firstImage = validImages[0];
+      const dimensions = await renderPage.evaluate(async (dataUrl) => {
+        const img = new Image();
+        img.src = dataUrl;
+        await img.decode();
+        return { width: img.naturalWidth, height: img.naturalHeight };
+      }, firstImage.dataUrl);
+
+      const targetW = dimensions.width > 0 ? dimensions.width : 1225;
+      const targetH = dimensions.height > 0 ? dimensions.height : 1585;
+      actualPages = validImages.length;
+
+      const cleanHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>${docMeta.title}</title>
+          <style>
+            @page {
+              size: ${targetW}px ${targetH}px !important;
+              margin: 0 !important;
+            }
+            *, *::before, *::after {
+              box-sizing: border-box !important;
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+            html, body {
+              margin: 0 !important;
+              padding: 0 !important;
+              background: #fff !important;
+              width: ${targetW}px !important;
+            }
+            .page-wrapper {
+              width: ${targetW}px !important;
+              height: ${targetH}px !important;
+              position: relative !important;
+              page-break-after: always !important;
+              break-after: page !important;
+              page-break-inside: avoid !important;
+              break-inside: avoid !important;
+              overflow: hidden !important;
+              background: #fff !important;
+            }
+            .page-wrapper:last-child {
+              page-break-after: avoid !important;
+              break-after: avoid !important;
+            }
+            .page-wrapper img {
+              width: ${targetW}px !important;
+              height: ${targetH}px !important;
+              display: block !important;
+              object-fit: fill !important;
+              position: absolute !important;
+              top: 0 !important;
+              left: 0 !important;
+              margin: 0 !important;
+              padding: 0 !important;
+            }
+          </style>
+        </head>
+        <body>
+          ${validImages.map((img, i) => `
+            <div class="page-wrapper" id="page-${i+1}">
+              <img src="${img.dataUrl}" alt="Page ${i+1}" />
+            </div>
+          `).join('')}
+        </body>
+        </html>
       `;
-      document.head.appendChild(style);
 
-      const title = document.querySelector('h1')?.innerText?.trim() || 
-                    document.querySelector('meta[property="og:title"]')?.content?.trim() || 
-                    'document';
+      await renderPage.setContent(cleanHtml, { waitUntil: 'load' });
 
-      return {
-        title,
-        actualPages: pfPages.length || 1
-      };
-    });
+      // Ensure all images are decoded synchronously
+      await renderPage.evaluate(async () => {
+        const imgs = Array.from(document.querySelectorAll('img'));
+        await Promise.all(imgs.map(img => img.decode().catch(() => {})));
+      });
 
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await new Promise(r => setTimeout(r, 1000));
+      onProgress({
+        step: 5,
+        percent: 92,
+        status: 'generating_pdf',
+        message: `Đang kết xuất buffer PDF sắc nét chuẩn 1:1 (${actualPages} trang)...`
+      });
 
-    onProgress({
-      step: 5,
-      percent: 90,
-      status: 'generating_pdf',
-      message: `Đang kết xuất buffer PDF chất lượng cao (${processedStats.actualPages} trang)...`
-    });
+      await renderPage.emulateMediaType('screen');
 
-    await page.emulateMediaType('print');
+      pdfBuffer = await renderPage.pdf({
+        width: `${targetW}px`,
+        height: `${targetH}px`,
+        printBackground: true,
+        preferCSSPageSize: true,
+        pageRanges: `1-${actualPages}`,
+        margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+      });
 
-    const pdfBuffer = await page.pdf({
-      printBackground: true,
-      preferCSSPageSize: true,
-      pageRanges: `1-${processedStats.actualPages || 1}`,
-      margin: {
-        top: '0px',
-        right: '0px',
-        bottom: '0px',
-        left: '0px'
-      }
-    });
+      await renderPage.close();
+    } else {
+      throw new Error('Không thể trích xuất hình ảnh các trang tài liệu Studocu để kết xuất PDF nguyên vẹn.');
+    }
 
     if (!pdfBuffer || pdfBuffer.length < 2048) {
       throw new Error('Không thể kết xuất tài liệu Studocu hoặc tài liệu bị rỗng.');
@@ -511,8 +475,8 @@ async function generateStudocuPdf(docId, targetUrl, onProgress = () => {}, optio
     const result = {
       docId,
       platform: 'studocu',
-      title: docMeta.title || `studocu_document_${docId}`,
-      totalPages: processedStats.actualPages,
+      title: docMeta.title,
+      totalPages: actualPages,
       fileSize: stats.size,
       fileSizeFormatted: (stats.size / (1024 * 1024)).toFixed(2) + ' MB',
       filePath: outputPath,

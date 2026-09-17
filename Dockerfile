@@ -24,25 +24,31 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y google-chrome-stable --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Hugging Face Spaces runs as UID 1000 (non-root)
+RUN useradd -m -u 1000 user
+USER user
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
+WORKDIR $HOME/app
 
 # Copy package files and install dependencies
-COPY package*.json ./
+COPY --chown=user:user package*.json ./
 RUN npm install --production
 
 # Copy all source files
-COPY . .
+COPY --chown=user:user . .
 
 # Set environment variables
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=7860
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+ENV CHROME_PATH=/usr/bin/google-chrome-stable
 ENV DISPLAY=:99
 
-# Expose server port
-EXPOSE 3000
+# Expose server port (Hugging Face default: 7860)
+EXPOSE 7860
 
 # Start Express server with Xvfb virtual display
 CMD ["xvfb-run", "-a", "--server-args=-screen 0 1920x1080x24", "node", "index.js"]
+
